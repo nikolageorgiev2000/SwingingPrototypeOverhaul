@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System;
+using UnityEngine;
 
 public class CameraController : MonoBehaviour
 {
@@ -24,6 +25,11 @@ public class CameraController : MonoBehaviour
         }
         transform.position = ReferenceObject.transform.position + offset;
         transform.LookAt(ReferenceObject.transform.position);
+
+        float minFOV = 60;
+        float maxFOV = 110;
+        //uses player velocity to widen field of view, with max FOV at 75+30 = 105 and max velocity 200
+        GetComponent<Camera>().fieldOfView = Mathf.Lerp(GetComponent<Camera>().fieldOfView, minFOV + (ReferenceObject.GetComponent<Rigidbody>().velocity.magnitude / 200) * (maxFOV-minFOV), Time.deltaTime);
     }
 
     public Vector3 getXYDirection()

@@ -1,4 +1,5 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -13,6 +14,7 @@ public class PlayerController : MonoBehaviour
     private float vertDir;
     private float controlScale;
 
+    bool jump;
     bool[] newRope;
     bool[] isHooked;
     RopeConnector[] ropes;
@@ -29,6 +31,7 @@ public class PlayerController : MonoBehaviour
         newRope = new bool[2];
         isHooked = new bool[2];
         ropes = new RopeConnector[2];
+        jump = false;
 
         //intitialize booleans
         newRope[0] = false;
@@ -56,7 +59,7 @@ public class PlayerController : MonoBehaviour
         //if space pressed gain height
         if (Input.GetButtonDown("Jump"))
         {
-            GetComponent<Rigidbody>().velocity += new Vector3(0, 30, 0);
+            jump = true;
         }
 
         //if rope spawn inputs are given record that a new rope is required
@@ -97,49 +100,97 @@ public class PlayerController : MonoBehaviour
 
     public RopeConnector ropeGen(int hookIndex)
     {
-        //-1+2*hookIndex leads to dir = -1; +1 for hookIndex input into ropeGen
-        int dir = 1 - hookIndex * 2;
+        //-1+2*hookIndex leads to handDir = -1; +1 for hookIndex input into ropeGen, or left or right handed rope swing
+        int handDir = 1 - hookIndex * 2;
 
         Vector3 camDirXZ = Vector3.Scale((transform.position - playerCamera.transform.position), new Vector3(1, 0, 1)).normalized;
+        //the XZ direction of player input
         //((vertDir+horizDir != 0) ? vertDir : 1) assumes attaching rope in direction of camera if no direction of XZ motion is given
-        Vector3 controlDir = ((vertDir + horizDir != 0) ? vertDir : 1) * camDirXZ + -((vertDir + horizDir != 0) ? horizDir : 0) * Vector3.Cross(camDirXZ, Vector3.up);
-        //move rope spawning direction to highest angle
-        controlDir = Quaternion.AngleAxis(85, Vector3.Cross(controlDir, Vector3.up)) * controlDir;
+        Vector3 inputDir = ((vertDir + horizDir != 0) ? vertDir : 1) * camDirXZ + -((vertDir + horizDir != 0) ? horizDir : 0) * Vector3.Cross(camDirXZ, Vector3.up);
+        //move rope spawning direction to highest angle in direction of player's movement input
+        Vector3 controlDir = Quaternion.AngleAxis(85, Vector3.Cross(inputDir, Vector3.up)) * inputDir;
 
         Ray controlRay = new Ray(transform.position, controlDir);
         RaycastHit hit;
-        float maxRopeLength = 400;
+        float maxRopeLength = 300;
         //angle in degrees to search for a rope to the sides
         float searchWidth = 60;
 
         //total number of rays cast searching for hook point: vertRays * horizRays
-        float vertRays = 15;
-        float horizRays = 15;
+        float vertRays = 25;
+        float horizRays = 25;
+
+        Vector3 optimalHitPoint = Vector3.zero;
+        float maxRopeFitness = -Mathf.Infinity;
 
         //when dir is -1 check to the left, when dir is 1 check to the right
         for (int i = 0; i < vertRays; i++)
         {
             //decrement vertical angle to a lower one if no hook point is found above
             controlDir = Quaternion.AngleAxis(-90 / vertRays, Vector3.Cross(controlDir, Vector3.up)) * controlDir;
-            for (int j = 0; j * dir < horizRays; j += dir)
+            for (int j = 0; j * handDir < horizRays; j += handDir)
             {
                 //if hook point found, connect rope to it
                 if (Physics.Raycast(controlRay, out hit, maxRopeLength))
                 {
-                    return new RopeConnector(gameObject, hit.point);
+                    if (ropeFitness(controlDir, hit.point, inputDir, maxRopeFitness) > maxRopeFitness)
+                    {
+                        optimalHitPoint = hit.point;
+                        maxRopeFitness = ropeFitness(controlDir, hit.point, inputDir, maxRopeFitness);
+                    }
                 }
                 //if no hook point found, move rope direction further to the side
                 controlRay = new Ray(transform.position, Quaternion.Euler(0, (searchWidth / horizRays) * j, 0) * controlDir);
             }
         }
-        //if no hook point found return null
-        return null;
+        if (optimalHitPoint != Vector3.zero)
+        {
+            return new RopeConnector(gameObject, optimalHitPoint);
+        }
+        else
+        {
+            //if no hook point found return null
+            return null;
+        }
+    }
+
+    float ropeFitness(Vector3 ropeDir, Vector3 hookPoint, Vector3 inputDir, float maxRopeFitness)
+    {
+        inputDir = inputDir.normalized;
+        ropeDir = ropeDir.normalized;
+        Vector3 vDir = GetComponent<Rigidbody>().velocity.normalized;
+        //preferred length of the rope vs hook height off the ground (when hanging will be (1-ropeHeightRatio) of the way from the ground to the hook
+        float ropeHeightRatio = 0.50f;
+        float preferredHangHeight = ropeHeightRatio * hookPoint.y;
+        //prefer higher points when the player is closer to being underneath them (avoids selecting points right next to player which negate forward motion)
+        //old *Math.Max(0, (1 - (Math.Abs(preferredHangHeight - (hookPoint - transform.position).magnitude) / preferredHangHeight)))
+        float heightPref = ((hookPoint.y - transform.position.y) / hookPoint.y) * (Math.Abs(hookPoint.y - transform.position.y) / (transform.position - hookPoint).magnitude);
+        //prefer rope in direction perpendicular to player motion (used for horizontal ropes while falling) as long as it would not result in a ground collision
+        float velocityPref = (((transform.position - hookPoint).magnitude < preferredHangHeight) ? 1 : 0) * Math.Abs(Vector3.Dot(vDir, Vector3.up)) * Vector3.Dot(vDir, ropeDir.normalized);
+        //prefer rope in XZ direction of player movement input
+        float inputPref = Mathf.Sqrt(Vector3.Dot(new Vector3(ropeDir.x, 0, ropeDir.z).normalized, inputDir));
+        if (heightPref * velocityPref * inputPref > maxRopeFitness)
+        {
+            Debug.Log(heightPref + " " + velocityPref + " " + inputPref);
+        }
+        return heightPref * velocityPref * inputPref;
     }
 
     void FixedUpdate()
     {
-        //player XZ movement control scale
-        controlScale = 4;
+        //velocity-cap at max velocity
+        float maxV = 200;
+        GetComponent<Rigidbody>().velocity = (GetComponent<Rigidbody>().velocity.magnitude > maxV) ? maxV * GetComponent<Rigidbody>().velocity.normalized : GetComponent<Rigidbody>().velocity;
+
+        if (jump)
+        {
+            GetComponent<Rigidbody>().velocity += new Vector3(0, 30, 0);
+            jump = false;
+        }
+
+        //player XZ movement control scale. more control if in a swing (more speed)
+        controlScale = (isHooked[0] || isHooked[1]) ? 3 : 6;
+
         //camera direction on XZ plane
         Vector3 camDirXZ = Vector3.Scale((transform.position - playerCamera.transform.position), new Vector3(1, 0, 1)).normalized;
         //using user WASD input and camera direction on XZ plane add movement force
@@ -223,12 +274,19 @@ public class PlayerController : MonoBehaviour
             Vector3 dir = (getCurrentHook().transform.position - player.transform.position).normalized;
             float tempDist = (player.transform.position - getCurrentHook().transform.position).magnitude;
             float m = player.GetComponent<Rigidbody>().mass;
-            Debug.Log(tempDist - hookDist);
             //if the player distance from the hook exceeds that of the rope length remove velocity component that would cause it to increase
             //and add centripetal force to swing player realistically (F = mv^2/r)
-            if (tempDist >= hookDist)
+            if (tempDist > hookDist)
             {
-                player.GetComponent<Rigidbody>().velocity = v - Vector3.Project(v, dir);
+                if (v.magnitude != 0)
+                {
+                    float vLostPercent = 1 - (v - Vector3.Project(v, dir)).magnitude / v.magnitude;
+                    player.GetComponent<Rigidbody>().velocity = v - Vector3.Project(v, dir);
+
+                    //make up for lost velocity in direction of rope by redirecting 1/10 of lost velocity
+                    player.GetComponent<Rigidbody>().velocity *= 1 + vLostPercent / 10;
+                }
+
                 Vector3 cForce = dir * m * v.magnitude * v.magnitude / hookDist;
                 player.GetComponent<Rigidbody>().AddForce(cForce - Vector3.Project(Physics.gravity, dir) * m);
             }
@@ -255,7 +313,8 @@ public class PlayerController : MonoBehaviour
             GameObject line = new GameObject();
             line.name = "linerenderer";
             line.AddComponent<LineRenderer>();
-            line.GetComponent<LineRenderer>().startWidth = 0.1f;
+            line.GetComponent<LineRenderer>().startWidth = 0.15f;
+
             return line;
         }
 
@@ -265,6 +324,8 @@ public class PlayerController : MonoBehaviour
             for (int i = 0; i < lines.Count - 1; i++)
             {
                 lines[i].GetComponent<LineRenderer>().SetPositions(new Vector3[] { hooks[i].transform.position, hooks[i + 1].transform.position });
+                lines[i].GetComponent<LineRenderer>().startColor = Color.gray;
+                lines[i].GetComponent<LineRenderer>().endColor = Color.gray;
             }
             lines[lines.Count - 1].GetComponent<LineRenderer>().SetPositions(new Vector3[] { player.transform.position, getCurrentHook().transform.position });
         }
