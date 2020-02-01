@@ -14,10 +14,13 @@ public class PlayerController : MonoBehaviour
     private float vertDir;
     private float controlScale;
 
+    private bool colliding;
+
     bool jump;
     bool[] newRope;
     bool[] isHooked;
     RopeConnector[] ropes;
+    Vector3[] tempAngularVelocity;
 
     // Start is called before the first frame update
     void Start()
@@ -39,6 +42,10 @@ public class PlayerController : MonoBehaviour
         isHooked[0] = false;
         isHooked[1] = false;
 
+        colliding = false;
+
+        tempAngularVelocity = new Vector3[2];
+
         //remove control of cursor and hide it to remove unwanted clicks outside game
         Cursor.lockState = CursorLockMode.Locked;
     }
@@ -46,6 +53,16 @@ public class PlayerController : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
+        GetComponent<Animator>().SetBool("IsGrounded", isGrounded());
+        GetComponent<Animator>().SetFloat("InputHorizontal", horizDir);
+        GetComponent<Animator>().SetFloat("InputVertical", vertDir);
+        GetComponent<Animator>().SetFloat("InputMagnitude", GetComponent<Rigidbody>().velocity.magnitude);
+        GetComponent<Animator>().SetBool("IsStrafing", false);
+        GetComponent<Animator>().SetBool("IsSprinting", true);
+        GetComponent<Animator>().SetFloat("GroundDistance", transform.position.y);
+
+
+
         //if player presses escape allow control of cursor
         if (Input.GetKey(KeyCode.Escape))
         {
@@ -57,7 +74,7 @@ public class PlayerController : MonoBehaviour
         vertDir = Input.GetAxisRaw("Vertical");
 
         //if space pressed gain height
-        if (Input.GetButtonDown("Jump"))
+        if (Input.GetButtonDown("Jump") && Physics.Raycast(transform.position, -Vector3.up, 5))
         {
             jump = true;
         }
@@ -159,21 +176,45 @@ public class PlayerController : MonoBehaviour
         inputDir = inputDir.normalized;
         ropeDir = ropeDir.normalized;
         Vector3 vDir = GetComponent<Rigidbody>().velocity.normalized;
+        //percent of speed in the XZ plane (checks that if the player is moving horizontally quickly or if the player is falling flat webs can be used, but not if moving slowly horizontally)
+        float horizSpeedPercent = Vector3.Scale(GetComponent<Rigidbody>().velocity, new Vector3(1, 0, 1)).magnitude / GetComponent<Rigidbody>().velocity.magnitude;
         //preferred length of the rope vs hook height off the ground (when hanging will be (1-ropeHeightRatio) of the way from the ground to the hook
-        float ropeHeightRatio = 0.50f;
+        float ropeHeightRatio = 0.75f;
         float preferredHangHeight = ropeHeightRatio * hookPoint.y;
         //prefer higher points when the player is closer to being underneath them (avoids selecting points right next to player which negate forward motion)
         //old *Math.Max(0, (1 - (Math.Abs(preferredHangHeight - (hookPoint - transform.position).magnitude) / preferredHangHeight)))
         float heightPref = ((hookPoint.y - transform.position.y) / hookPoint.y) * (Math.Abs(hookPoint.y - transform.position.y) / (transform.position - hookPoint).magnitude);
-        //prefer rope in direction perpendicular to player motion (used for horizontal ropes while falling) as long as it would not result in a ground collision
-        float velocityPref = (((transform.position - hookPoint).magnitude < preferredHangHeight) ? 1 : 0) * Math.Abs(Vector3.Dot(vDir, Vector3.up)) * Vector3.Dot(vDir, ropeDir.normalized);
+        //prefer rope in direction perpendicular to player motion (used for horizontal ropes while falling)
+        //not used if the player's horizontal speed is slow but a large part of the velocity because then higher hook points should be used
+        //not used if it would result in a swing where the player falls lower than the preferred hang height
+        float velocityPref = (((transform.position - hookPoint).magnitude > preferredHangHeight && GetComponent<Rigidbody>().velocity.magnitude > 60 * horizSpeedPercent) ? 1 : 0) * Math.Abs(Vector3.Dot(vDir, Vector3.up)) * Vector3.Dot(vDir, ropeDir.normalized);
         //prefer rope in XZ direction of player movement input
         float inputPref = Mathf.Sqrt(Vector3.Dot(new Vector3(ropeDir.x, 0, ropeDir.z).normalized, inputDir));
+
+        //Debug.Log(GetComponent<Rigidbody>().velocity.magnitude + " ?>? " + 10 * horizSpeedPercent);
         if (heightPref * velocityPref * inputPref > maxRopeFitness)
         {
-            Debug.Log(heightPref + " " + velocityPref + " " + inputPref);
+            //Debug.Log(heightPref + " " + velocityPref + " " + inputPref);
         }
         return heightPref * velocityPref * inputPref;
+    }
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        colliding = true;
+        Vector3 normal = Vector3.zero;
+        foreach (ContactPoint c in collision)
+        {
+            normal += c.normal;
+        }
+        normal /= collision.contactCount;
+        GetComponent<Rigidbody>().velocity = Vector3.Reflect(GetComponent<Rigidbody>().velocity, normal);
+        Debug.Log("hi");
+    }
+
+    private void OnCollisionExit(Collision collision)
+    {
+        colliding = false;
     }
 
     void FixedUpdate()
@@ -184,18 +225,22 @@ public class PlayerController : MonoBehaviour
 
         if (jump)
         {
-            GetComponent<Rigidbody>().velocity += new Vector3(0, 30, 0);
+            GetComponent<Rigidbody>().velocity += new Vector3(0, 300, 0);
             jump = false;
         }
 
         //player XZ movement control scale. more control if in a swing (more speed)
-        controlScale = (isHooked[0] || isHooked[1]) ? 3 : 6;
+        controlScale = (isHooked[0] || isHooked[1]) ? maxV/5 : maxV/2;
 
         //camera direction on XZ plane
+        //old
+        //Vector3 camDirXZ = Vector3.Scale((transform.position - playerCamera.transform.position), new Vector3(1, (isHooked[0] || isHooked[1]) ? 1 : 0, 1)).normalized;
         Vector3 camDirXZ = Vector3.Scale((transform.position - playerCamera.transform.position), new Vector3(1, 0, 1)).normalized;
+
         //using user WASD input and camera direction on XZ plane add movement force
         //left and right are flipped so horizDir is negative
-        Vector3 controlForce = controlScale * (vertDir * camDirXZ + -horizDir * Vector3.Cross(camDirXZ, Vector3.up)).normalized;
+        //need to check velocity isnt 0 or infinite force will be applied;
+        Vector3 controlForce = controlScale / Mathf.Sqrt(Mathf.Max(GetComponent<Rigidbody>().velocity.magnitude, 1)) * (vertDir * camDirXZ + -horizDir * Vector3.Cross(camDirXZ, Vector3.up)).normalized;
         GetComponent<Rigidbody>().AddForce(controlForce);
 
         for (int i = 0; i < newRope.Length; i++)
@@ -204,6 +249,7 @@ public class PlayerController : MonoBehaviour
             if (newRope[i])
             {
                 ropes[i] = ropeGen(i);
+
                 if (ropes[i] == null)
                 {
                     isHooked[i] = false;
@@ -218,6 +264,9 @@ public class PlayerController : MonoBehaviour
             }
         }
 
+        Vector3 combinedRopeDir = Vector3.zero;
+
+
         for (int i = 0; i < ropes.Length; i++)
         {
             //since ropes are destroyed within update, need to check it is not destroyed (using .destroyed)
@@ -226,8 +275,103 @@ public class PlayerController : MonoBehaviour
             {
                 //swinging physics called in RopeConnector
                 ropes[i].swing();
+
+                //get direction if holding both ropes or not
+                combinedRopeDir += (ropes[i].getCurrentHook().transform.position - transform.position).normalized;
+
+                //calculate angular velocity if ropes are released at this point in time
+                //Vector3 ropeLen = ropes[i].getCurrentHook().transform.position - transform.position;
+                ////Vector3 playerHeight = GetComponent<MeshRenderer>().bounds.size.y * ropeLen.normalized;
+                //Vector3 playerHeight = ropeLen.normalized * 2;
+                //Vector3 TRPY = 2 * ropeLen + playerHeight;
+                //Vector3 coeff = Vector3.Scale(playerHeight, new Vector3(1 / TRPY.x, 1 / TRPY.y, 1 / TRPY.z) - Vector3.Scale(2 * ropeLen, new Vector3(1 / playerHeight.x, 1 / playerHeight.y, 1 / playerHeight.z)));
+                //tempAngularVelocity[i] = Vector3.Scale(coeff, GetComponent<Rigidbody>().velocity);
+
+
+                //Vector3 denom = (2 * (ropes[i].getCurrentHook().transform.position - transform.position) + ((ropes[i].getCurrentHook().transform.position - transform.position)).normalized * GetComponent<MeshRenderer>().bounds.size.y);
+                //tempAngularVelocity[i] = Vector3.Scale(GetComponent<Rigidbody>().velocity, new Vector3(1/denom.x, 1/denom.y, 1/denom.z));
             }
         }
+
+        if (combinedRopeDir.Equals(Vector3.zero))
+        {
+            combinedRopeDir = transform.up;
+        }
+
+        //direction rule states
+        //on ground: perpendicular, facing direction on XZ plane
+        //within H distance from ground 
+        //
+        //
+
+        float rotationSmoother = 0.5f;
+        float rotRate = Time.fixedDeltaTime / rotationSmoother;
+
+        //transform.rotation = Quaternion.LookRotation(Vector3.Slerp(transform.forward, GetComponent<Rigidbody>().velocity, rotRate),transform.up);
+
+        //TODO create Slerp-like function but with springiness rather than being linear (ala Overgrowth dev)
+
+        bool isUpsideDown = (Vector3.Dot(transform.up, Vector3.up) < 0);
+
+        if (isHooked[0] || isHooked[1] && !isGrounded())
+        {
+            transform.rotation = Quaternion.LookRotation(Vector3.Slerp(transform.forward, GetComponent<Rigidbody>().velocity, rotRate), Vector3.Slerp(transform.up, combinedRopeDir, rotRate));
+        }
+        else if (!isGrounded())
+        {
+            Vector3 tempTransformUp = Vector3.Slerp(transform.up, Vector3.up, rotRate);
+            if (isUpsideDown)
+            {
+                transform.rotation = Quaternion.LookRotation(Vector3.Slerp(Vector3.Cross(transform.right, tempTransformUp), GetComponent<Rigidbody>().velocity.normalized, rotRate), tempTransformUp);
+            }
+            else
+            {
+                transform.rotation = Quaternion.LookRotation(Vector3.Slerp(transform.forward, GetComponent<Rigidbody>().velocity, rotRate), tempTransformUp);
+            }
+        }
+
+        Debug.Log(GetComponent<Rigidbody>().velocity);
+        //landing (not colliding, about 1 second from hitting surface below, moving downwards)
+        if (colliding == false && Physics.Raycast(transform.position, -Vector3.up, -GetComponent<Rigidbody>().velocity.y) && GetComponent<Rigidbody>().velocity.y<0)
+        {
+            //transform.rotation = Quaternion.LookRotation(Vector3.Slerp(transform.forward.normalized, new Vector3(transform.forward.x, 0, transform.forward.z).normalized, Time.fixedDeltaTime), Vector3.Slerp(transform.up, Vector3.up, rotRate));
+            transform.rotation = Quaternion.LookRotation(Vector3.Slerp(transform.forward, new Vector3(transform.forward.x, 0, transform.forward.z), rotRate * 2), Vector3.Slerp(transform.up, Vector3.up, rotRate * 2));
+        }
+
+        //moving on ground
+        if (isGrounded())
+        {
+            transform.rotation = Quaternion.LookRotation(Vector3.Slerp(new Vector3(transform.forward.x, 0, transform.forward.z), GetComponent<Rigidbody>().velocity.normalized, rotRate), Vector3.Slerp(transform.up, Vector3.up, rotRate));
+            //if (!(isHooked[0] || isHooked[1]))
+            //{
+            //    Debug.Log("5");
+            //    GetComponent<Rigidbody>().velocity = Vector3.Scale(GetComponent<Rigidbody>().velocity, Vector3.up);
+            //}
+        }
+
+
+        //rotate in direction of motion
+        //else
+        //{
+        //    if(tempAngularVelocity[0].Equals(Vector3.zero) && tempAngularVelocity[1].Equals(Vector3.zero))
+        //    {
+        //        //GetComponent<Rigidbody>().angularVelocity *= 0.95f * Time.fixedDeltaTime;
+        //        ////less than one degree per second
+        //        //if (GetComponent<Rigidbody>().angularVelocity.magnitude < 1)
+        //        //{
+        //        //    transform.up = Vector3.Slerp(transform.up, (combinedRopeDir.Equals(Vector3.zero) ? Vector3.up : combinedRopeDir), rotRate);
+        //        //}
+        //    } else
+        //    {
+        //        GetComponent<Rigidbody>().angularVelocity = tempAngularVelocity[0] + tempAngularVelocity[1];
+        //    }
+        //}
+
+    }
+
+    public bool isGrounded()
+    {
+        return colliding && Physics.Raycast(transform.position, -Vector3.up, 10);
     }
 
     public class RopeConnector
